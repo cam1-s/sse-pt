@@ -14,13 +14,13 @@
 #define USE_RAND_HEMISPHERE_TABLE
 
 // increase the size of these tables for extremely high sample renders.
-std::vector<vm::vec3> _rand_sphere_table(0x10000);
-std::vector<vm::vec3> _rand_hemisphere_table(0x8000);
+std::vector<vm::vec3> _rand_sphere_table(0x80000);
+std::vector<vm::vec3> _rand_hemisphere_table(0x80000);
 
 unsigned const _num_threads = std::thread::hardware_concurrency();
 
-unsigned const _num_bounces = 4;
-unsigned const _num_samples = 32;
+unsigned const _num_bounces = 6;
+unsigned const _num_samples = 64;
 
 unsigned const _width = 960;
 unsigned const _height = 720;
@@ -55,21 +55,10 @@ void generate_rand_hemisphere_table()
 #ifdef USE_RAND_HEMISPHERE_TABLE
 	for (auto &i : _rand_hemisphere_table)
 	{
-		vm::vec3 n(0.f, 1.f, 0.f);
-		
-		float r1 = 2.f * _pi * prng::itof(prng::next());
-		float r2 = prng::itof(prng::next());
-		float r2s = vm::fast_sqrt(r2);
-
-		vm::vec3 w = n;
-		vm::vec3 u;
-
-		if (fabs(w.x()) > .1f) { u = vm::normalize(vm::cross(vm::vec3(0.f,1.f,0.f), w)); }
-		else { u = vm::normalize(vm::cross(vm::vec3(1.f,0.f,0.f), w)); }
-
-		vm::vec3 v = vm::cross(w, u);
-
-		i = vm::normalize(u * cos(r1) * r2s + v* sin(r1) * r2s + w * sqrt(1 - r2));
+		float_type a = 2.f * _pi * prng::itof(prng::next());
+		float_type b = prng::itof(prng::next());
+		float_type s = vm::fast_sqrt(b);
+		i = vm::vec3(vm::fast_cos(a) * s, vm::fast_sin(a) * s, vm::fast_sqrt(1.f - b));
 	}
 #endif
 }
@@ -86,28 +75,22 @@ __always_inline static vm::vec3 rand_sphere()
 #endif
 }
 
-// random hemisphere direction
+// random hemisphere direction (cosine weighted)
 __always_inline static vm::vec3 rand_hemi(vm::vec3 const &n)
 {
+	vm::vec3 u, r, w = n;
 #ifdef USE_RAND_HEMISPHERE_TABLE
-	vm::vec3 r = _rand_hemisphere_table[prng::next() % _rand_hemisphere_table.size()];
-	return vm::dot(r, n) * r;
+	r = _rand_hemisphere_table[prng::next() % _rand_hemisphere_table.size()];
 #else
-	// cosine weighted
-	float r1 = 2.f * _pi * prng::itof(prng::next());
-	float r2 = prng::itof(prng::next());
-	float r2s = vm::fast_sqrt(r2);
-
-	vm::vec3 w = n;
-	vm::vec3 u;
-
-	if (fabs(w.x()) > .1f) { u = vm::normalize(vm::cross(vm::vec3(0.f,1.f,0.f), w)); }
-	else { u = vm::normalize(vm::cross(vm::vec3(1.f,0.f,0.f), w)); }
-
-	vm::vec3 v = vm::cross(w, u);
-
-	return vm::normalize(u * cos(r1) * r2s + v* sin(r1) * r2s + w * sqrt(1 - r2));
+	float_type a = 2.f * _pi * prng::itof(prng::next());
+	float_type b = prng::itof(prng::next());
+	float_type s = vm::fast_sqrt(b);
+	r = vm::vec3(vm::fast_cos(a) * s, vm::fast_sin(a) * s, vm::fast_sqrt(1.f - b));
 #endif
+	if (fabs(w.x()) > .1f) u = vm::normalize(vm::cross(vm::vec3(0.f, 1.f, 0.f), w));
+	else u = vm::normalize(vm::cross(vm::vec3(1.f, 0.f, 0.f), w));
+
+	return vm::normalize(u * r.x() + vm::cross(w, u) * r.y() + w * r.z());
 }
 
 class ray
@@ -412,9 +395,16 @@ vm::vec3 trace(ray &r)
 		{
 			col /= (i + 1);
 
-			if (ratio < .99f)
+			//if (ratio < .99f)
 			{
-				col += acc * albedo * (1.f - ratio);
+				auto &light = dynamic_cast<obj_sphere &>(ob);
+				vm::vec3 d = r.o - light.p;
+				float_type c = vm::dot(d, d) * light.r * light.r;
+				float_type w = 2.f * vm::fast_sqrt(c);
+
+				//float_type density = w * vm::clamp(vm::dot(r.d, normal), 0.f, 1.f);
+			//	col += vm::vec3(w);
+				col += acc * albedo * w * (1.f - ratio);
 			}
 			
 			return col;
@@ -431,6 +421,7 @@ vm::vec3 trace(ray &r)
 		acc *= albedo;
 
 		// backward sample
+		//if (false)
 		if (ratio > .01f)
 		{
 			for (auto const &o : _objects)
@@ -462,9 +453,9 @@ vm::vec3 trace(ray &r)
 						float_type c = vm::fast_sqrt(1.f - light.r * light.r / vm::dot(d, d));
 						float_type w = 2.f * (1.f - c);
 
-						float_type density = w * vm::clamp(vm::dot(shadow_ray.d, normal), 0.f, 1.f);
+						//float_type density = w * vm::clamp(vm::dot(shadow_ray.d, normal), 0.f, 1.f);
 
-						col += ratio * acc * light.m.sample() * density;
+						col += ratio * acc * light.m.sample() * w;
 					}
 				}
 			}
@@ -501,12 +492,16 @@ vm::vec3 sample(vm::vec2 const &coord)
 	return vm::pow(vm::clamp(ret, vm::vec3(0.f), vm::vec3(1.f)), vm::vec3(.6f));
 }
 
+volatile bool _kill_threads = false;
+
 void render(unsigned x0, unsigned y0, unsigned x1, unsigned y1)
 {
 	for (unsigned i = x0; i < x1; i++)
 	{
 		for (unsigned j = y0 + 1; j <= y1; j++)
 		{
+			if (_kill_threads) return;
+
 			vm::vec3 s = sample(vm::vec2(i, j));
 
 			uint8_t a = 0xFF;
@@ -522,36 +517,45 @@ void render(unsigned x0, unsigned y0, unsigned x1, unsigned y1)
 int main(int argc, char *argv[])
 {
 	mat_emission em(vm::vec3(64.f, 60.f, 55.f));
-	obj_sphere light(vm::vec3(-.3f, 1.5f, 2.f), .31f, em);
+	obj_sphere light(vm::vec3(0.f, 1.5f, 2.f), .3f, em);
 	_objects.push_back(&light);
 
-	mat_emission em1(vm::vec3(30.f, 25.f, 20.f));
-	obj_sphere light1(vm::vec3(.1f, .23f, .23f), .23f, em1);
-	_objects.push_back(&light1);
+	mat_glossy glossy0(vm::vec3(.2f, 0.2f, 1.f), 0.f);
+	obj_sphere glossy_sphere0(vm::vec3(-1.f, .35f, 0.f), .25f, glossy0);
+	_objects.push_back(&glossy_sphere0);
+
+	mat_glossy glossy1(vm::vec3(.2f, 0.2f, 1.f), .25f);
+	obj_sphere glossy_sphere1(vm::vec3(-.5f, .35f, 0.f), .25f, glossy1);
+	_objects.push_back(&glossy_sphere1);
+
+	mat_glossy glossy2(vm::vec3(.2f, 0.2f, 1.f), .5f);
+	obj_sphere glossy_sphere2(vm::vec3(-0.f, .35f, 0.f), .25f, glossy2);
+	_objects.push_back(&glossy_sphere2);
+
+	mat_glossy glossy3(vm::vec3(.2f, 0.2f, 1.f), .75f);
+	obj_sphere glossy_sphere3(vm::vec3(.5f, .35f, 0.f), .25f, glossy3);
+	_objects.push_back(&glossy_sphere3);
+
+	mat_glossy glossy4(vm::vec3(.2f, 0.2f, 1.f), 1.f);
+	obj_sphere glossy_sphere4(vm::vec3(1.f, .35f, 0.f), .25f, glossy4);
+	_objects.push_back(&glossy_sphere4);
+
+	mat_glossy glossy5(vm::vec3(1.f), 0.f);
+	obj_sphere sph_center(vm::vec3(0.f, .5f, 2.f), .5f, glossy5);
+	_objects.push_back(&sph_center);
+
+	mat_glass glass0(vm::vec3(1.f), 1.5f);
+	obj_sphere sph_right(vm::vec3(-1.f, .5f, 2.f), .5f, glass0);
+	_objects.push_back(&sph_right);
+
+	mat_diffuse diff1(vm::vec3(1.f), 1.f);
+	obj_sphere sph_left(vm::vec3(1.f, .5f, 2.f), .5f, diff1);
+	_objects.push_back(&sph_left);
 
 	mat_diffuse dif_white(vm::vec3(.8f), .84f);
 	mat_diffuse dif_red(vm::vec3(1.f, 0.f, 0.f), .84f);
 	mat_diffuse dif_green(vm::vec3(0.f, 1.f, 0.f), .84f);
 
-	mat_glossy glossy(vm::vec3(.8f), .3f);
-	obj_sphere glossy_sphere(vm::vec3(.8f, .34f, 1.f), .34f, glossy);
-	_objects.push_back(&glossy_sphere);
-
-	mat_glass glass(vm::vec3(.8f), 1.5f);
-	obj_sphere glass_sphere(vm::vec3(-.8f, .8f, 0.f), .4f, glass);
-	_objects.push_back(&glass_sphere);
-
-	mat_glossy glossy1(vm::vec3(.8f), .04f);
-	obj_sphere glossy_sphere1(vm::vec3(.4f, 2.4f, 2.3f), .38f, glossy1);
-	_objects.push_back(&glossy_sphere1);
-
-	obj_sphere red_sphere(vm::vec3(-1.f, .2f, -0.3f), .2f, dif_red);
-	_objects.push_back(&red_sphere);
-
-	obj_sphere green_sphere(vm::vec3(.2f, .3f, 2.f), .3f, dif_green);
-	_objects.push_back(&green_sphere);
-
-	//mat_diffuse floor_mat(vm::vec3(.8f), .04f);
 	obj_plane floor(vm::vec3(0.f, 1.f, 0.f), 0.f, dif_white);
 	_objects.push_back(&floor);
 
@@ -602,6 +606,8 @@ int main(int argc, char *argv[])
 		SDL_DestroyRenderer(sdl_renderer);
 		SDL_DestroyWindow(sdl_window);
 		SDL_Quit();
+
+		_kill_threads = true;
 	});
 
 	generate_rand_sphere_table();
@@ -628,7 +634,7 @@ int main(int argc, char *argv[])
 	int64_t time = std::chrono::duration_cast<std::chrono::microseconds>(_end - _begin).count();
 	double dtime = static_cast<double>(time) / 1000000.;
 
-	std::printf("rendering complete. %.08llf seconds\n", dtime);
+	if (!_kill_threads) std::printf("rendering complete. %.08llf seconds\n", dtime);
 
 	// i wrote this whole bmp file tool and now i dont even need it.
 
