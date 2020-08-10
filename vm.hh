@@ -6,7 +6,11 @@
 #include <cstdint>
 #include <cmath>
 
+//#define VM_DISABLE_SIMD
+
+#if (defined(__i386__) || defined(__x86_64__)) && !defined(VM_DISABLE_SIMD)
 #include <x86intrin.h>
+#endif
 
 #include "inline.hh"
 
@@ -183,7 +187,7 @@ template <class T> __always_inline T length(tvec3<T> const &a)
 
 template <class T> __always_inline T rlength(tvec3<T> const &a)
 {
-	return rsqrtf(dot(a, a));
+	return rsqrt(dot(a, a));
 }
 
 template <class T> __always_inline T length2(tvec3<T> const &a)
@@ -253,7 +257,7 @@ typedef tvec3<double>   dvec3;
 typedef tvec3<int32_t>  ivec3;
 typedef tvec3<uint32_t> uvec3;
 
-#ifdef __i386__
+#if !(defined(__i386__) || defined(__x86_64__)) || defined(VM_DISABLE_SIMD)
 
 #warning "not using SIMD vector types."
 typedef tvec3<float_type> vec3;

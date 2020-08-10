@@ -6,17 +6,21 @@
 #include <functional>
 #include <fstream>
 
+// hack to remove "undefined reference to WinMain" on MINGW
+#define SDL_main_h_
 #include <SDL2/SDL.h>
 
 #define USE_RAND_SPHERE_TABLE
+#define USE_RAND_HEMISPHERE_TABLE
+
+// increase the size of these tables for extremely high sample renders.
+std::vector<vm::vec3> _rand_sphere_table(0x10000);
+std::vector<vm::vec3> _rand_hemisphere_table(0x8000);
 
 unsigned const _num_threads = std::thread::hardware_concurrency();
 
 unsigned const _num_bounces = 4;
-unsigned const _num_samples = 128;
-
-// increase the size of this table for extremely high sample renders.
-std::vector<vm::vec3> _rand_sphere_table(0x30000);
+unsigned const _num_samples = 32;
 
 unsigned const _width = 960;
 unsigned const _height = 720;
@@ -42,9 +46,30 @@ void generate_rand_sphere_table()
 
 		// TODO: test bias for the sampling technique below
 		//i = vm::normalize(vm::vec3(prng::itof(prng::next()) - .5f, prng::itof(prng::next()) - .5f, prng::itof(prng::next()) - .5f));
-	
-		vm::vec3 r = vm::vec3(prng::itof(prng::next()), prng::itof(prng::next()), prng::itof(prng::next()));
+	}
+#endif
+}
+
+void generate_rand_hemisphere_table()
+{
+#ifdef USE_RAND_HEMISPHERE_TABLE
+	for (auto &i : _rand_hemisphere_table)
+	{
+		vm::vec3 n(0.f, 1.f, 0.f);
 		
+		float r1 = 2.f * _pi * prng::itof(prng::next());
+		float r2 = prng::itof(prng::next());
+		float r2s = vm::fast_sqrt(r2);
+
+		vm::vec3 w = n;
+		vm::vec3 u;
+
+		if (fabs(w.x()) > .1f) { u = vm::normalize(vm::cross(vm::vec3(0.f,1.f,0.f), w)); }
+		else { u = vm::normalize(vm::cross(vm::vec3(1.f,0.f,0.f), w)); }
+
+		vm::vec3 v = vm::cross(w, u);
+
+		i = vm::normalize(u * cos(r1) * r2s + v* sin(r1) * r2s + w * sqrt(1 - r2));
 	}
 #endif
 }
@@ -64,10 +89,10 @@ __always_inline static vm::vec3 rand_sphere()
 // random hemisphere direction
 __always_inline static vm::vec3 rand_hemi(vm::vec3 const &n)
 {
-	// precomputed
-	/*vm::vec3 r = rand_sphere();
-	return vm::dot(r, n) * r;*/
-
+#ifdef USE_RAND_HEMISPHERE_TABLE
+	vm::vec3 r = _rand_hemisphere_table[prng::next() % _rand_hemisphere_table.size()];
+	return vm::dot(r, n) * r;
+#else
 	// cosine weighted
 	float r1 = 2.f * _pi * prng::itof(prng::next());
 	float r2 = prng::itof(prng::next());
@@ -82,6 +107,7 @@ __always_inline static vm::vec3 rand_hemi(vm::vec3 const &n)
 	vm::vec3 v = vm::cross(w, u);
 
 	return vm::normalize(u * cos(r1) * r2s + v* sin(r1) * r2s + w * sqrt(1 - r2));
+#endif
 }
 
 class ray
@@ -445,7 +471,7 @@ vm::vec3 trace(ray &r)
 		}
 	}
 
-	return col / (_num_bounces + 1);
+	return col / (_num_bounces + 1.f);
 }
 
 vm::vec3 sample(vm::vec2 const &coord)
@@ -579,6 +605,7 @@ int main(int argc, char *argv[])
 	});
 
 	generate_rand_sphere_table();
+	generate_rand_hemisphere_table();
 
 	std::vector<std::thread> threads(_num_threads);
 
